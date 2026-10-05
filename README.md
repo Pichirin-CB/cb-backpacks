@@ -48,6 +48,7 @@ cb-backpacks/
 ├─ README.md
 ├─ client/main.lua
 ├─ server/main.lua
+├─ server/version.lua
 ├─ bridge/
 │  ├─ shared.lua
 │  ├─ framework_server.lua
@@ -170,6 +171,15 @@ Inventory (`Config.Inventory`):
   older versions use different APIs and are not supported.
 • Others - not implemented. See "Adding another inventory".
 • Freemode male/female ped models only.
+
+---------------------------------------------------------------------------
+
+# Version Check
+
+On start the server console shows whether a newer version is published. It
+downloads one public JSON file and sends no server data. Disable it with
+`Config.VersionCheck.enabled = false`. The installed version is the `version`
+field in `fxmanifest.lua`.
 
 ---------------------------------------------------------------------------
 

@@ -34,5 +34,6 @@ server_scripts {
     '@oxmysql/lib/MySQL.lua',
     'bridge/framework_server.lua',
     'bridge/inventory_server.lua',
-    'server/main.lua'
+    'server/main.lua',
+    'server/version.lua'
 }

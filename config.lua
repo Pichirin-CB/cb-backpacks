@@ -28,6 +28,20 @@ Config.Framework = 'auto'
 Config.Inventory = 'auto'
 
 -- ═════════════════════════════════════════════════════════════════════
+--  VERSION CHECK
+--  Prints in the server console whether a newer version is published.
+--  Only reads a public JSON file. It never sends server data.
+--  enabled : false disables the check.
+--  url     : metadata file (resource, version, changelog, store).
+--  delay   : ms to wait after start before printing.
+-- ═════════════════════════════════════════════════════════════════════
+
+Config.VersionCheck = {
+    enabled = true,
+    url = 'https://raw.githubusercontent.com/Pichirin-CB/cb-studios-versions/main/versions/cb-backpacks.json',
+    delay = 5000,
+}
+-- ═════════════════════════════════════════════════════════════════════
 --  BACKPACKS
 --
 --  Key        Item name (must exist in ox_inventory/data/items.lua).
