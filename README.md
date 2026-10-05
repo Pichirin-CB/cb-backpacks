@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="assets/cb-backpacks.jpg" alt="CB Backpacks Preview" width="900">
+</p>
 
 ██████╗ ███████╗ █████╗ ██████╗ ███╗   ███╗███████╗ 
 ██╔══██╗██╔════╝██╔══██╗██╔══██╗████╗ ████║██╔════╝ 
