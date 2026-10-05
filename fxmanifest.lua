@@ -6,7 +6,8 @@ lua54 'yes'
 author 'CB Studios'
 description 'Wearable backpacks with persistent inventory stashes. Built-in framework/inventory bridge (ox_inventory). Optional: rpemotes-reborn.'
 version '1.0.0'
-
+documentation 'https://docs.pichirincb.com/#/'
+discord 'https://discord.gg/hsx6AvBg5s'
 repository 'https://github.com/Pichirin-CB/cb-backpacks'
 
 dependencies {
