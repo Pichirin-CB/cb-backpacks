@@ -1,361 +1,801 @@
 local equipped = nil
 local baseComponent = nil
-local actionBusy = false
-local lastUsed = {}
+local busy = false
 
 local function debug(...)
-    if Config.Debug then
-        print('[cb-backpacks]', ...)
+    if not Config.Debug then
+        return
     end
+
+    print('[cb-backpacks]', ...)
 end
 
 local function notify(description, type)
     lib.notify({
-        title = 'Mochilas',
+        title = L('title'),
         description = description,
         type = type or 'inform',
     })
 end
-
-local function isBackpack(itemName)
-    return itemName and Config.Backpacks[itemName] ~= nil
+local function isBackpack(name)
+    return name and Config.Backpacks[name] ~= nil
 end
 
-local function getCurrentComponents()
-    local ped = cache.ped
-    local components = {}
-
-    for componentId = 0, 11 do
-        components[#components + 1] = {
-            component_id = componentId,
-            drawable = GetPedDrawableVariation(ped, componentId),
-            texture = GetPedTextureVariation(ped, componentId),
-        }
+local function getBackpackId(item)
+    if not item or not item.metadata then
+        return nil
     end
 
-    return components
+    return item.metadata[Config.Metadata.id]
 end
 
-local function getCurrentProps()
-    local ped = cache.ped
-    local props = {}
+local function getPlayerItems()
+    local items = Bridge.Inventory and Bridge.Inventory.GetItems()
 
-    for propId = 0, 7 do
-        local drawable = GetPedPropIndex(ped, propId)
-        local texture = drawable >= 0 and GetPedPropTextureIndex(ped, propId) or 0
-
-        props[#props + 1] = {
-            prop_id = propId,
-            drawable = drawable,
-            texture = texture,
-        }
-    end
-
-    return props
+    return items or {}
 end
 
-local function getAppearanceModel()
-    local model = GetEntityModel(cache.ped)
-
-    if model == joaat('mp_f_freemode_01') then
-        return 'mp_f_freemode_01'
+local function findBackpackById(backpackId)
+    if not backpackId then
+        return nil
     end
 
-    if model == joaat('mp_m_freemode_01') then
-        return 'mp_m_freemode_01'
+    local items = getPlayerItems()
+
+    for slot, item in pairs(items) do
+        if item
+            and isBackpack(item.name)
+            and getBackpackId(item) == backpackId
+        then
+            return slot, item
+        end
     end
 
     return nil
 end
 
-local function applyAppearanceComponents(components, props)
-    local model = getAppearanceModel()
+local function getComponentState(component)
+    local ped = PlayerPedId()
 
-    -- illenium-appearance's public changeOutfit event is used so the
-    -- appearance resource remains the authority for clothing changes.
-    if not model then
-        notify('Este personaje no usa un modelo freemode compatible.', 'error')
+    return {
+        drawable = GetPedDrawableVariation(ped, component),
+        texture = GetPedTextureVariation(ped, component),
+    }
+end
+
+local function isValidDrawable(component, drawable)
+    local ped = PlayerPedId()
+
+    local count = GetNumberOfPedDrawableVariations(
+        ped,
+        component
+    )
+
+    return drawable >= 0 and drawable < count
+end
+
+-- Addon clothes get a global drawable index that depends on load order, so it
+-- is resolved from collection name + local index (documented FiveM natives).
+local resolvedCollection = nil
+
+local function collectionsAvailable()
+    return GetPedCollectionsCount
+        and GetPedCollectionName
+        and GetNumberOfPedCollectionDrawableVariations
+        and GetPedDrawableGlobalIndexFromCollection
+end
+
+local function findCollection(ped, component, backpack)
+    local wanted = backpack.collection
+
+    if wanted and GetNumberOfPedCollectionDrawableVariations(ped, component, wanted) > 0 then
+        return wanted
+    end
+
+    -- Configured name does not match: look for a collection that has this
+    -- component and whose name looks like the backpack pack.
+    for i = 0, GetPedCollectionsCount(ped) - 1 do
+        local name = GetPedCollectionName(ped, i)
+
+        if name ~= ''
+            and name:lower():find('backpack', 1, true)
+            and GetNumberOfPedCollectionDrawableVariations(ped, component, name) > 0
+        then
+            debug(('Collection "%s" not found, using "%s" instead.'):format(
+                tostring(wanted),
+                name
+            ))
+
+            return name
+        end
+    end
+
+    return nil
+end
+
+local function resolveDrawable(ped, component, backpack)
+    resolvedCollection = nil
+    if not backpack.localDrawable or not collectionsAvailable() then
+        return backpack.drawable or 0
+    end
+
+    local collection = findCollection(ped, component, backpack)
+    resolvedCollection = collection
+
+    if not collection then
+        debug(('No clothing collection with component %s found for this ped model.'):format(component))
+        return nil
+    end
+
+    local count = GetNumberOfPedCollectionDrawableVariations(ped, component, collection)
+
+    if backpack.localDrawable >= count then
+        debug(('Collection "%s" only has %s drawables for component %s (wanted local %s).'):format(
+            collection,
+            count,
+            component,
+            backpack.localDrawable
+        ))
+
+        return nil
+    end
+
+    local global = GetPedDrawableGlobalIndexFromCollection(
+        ped,
+        component,
+        collection,
+        backpack.localDrawable
+    )
+
+    debug(('Resolved "%s" local %s -> global drawable %s'):format(
+        collection,
+        backpack.localDrawable,
+        global
+    ))
+
+    if global == nil or global < 0 then
+        return nil
+    end
+
+    return global
+end
+local function applyBackpackClothing(backpack)
+    local ped = PlayerPedId()
+
+    local component = backpack.component or 5
+    local drawable = resolveDrawable(ped, component, backpack)
+    local texture = backpack.texture or 0
+
+    if not drawable then
+        notify(L('clothing_not_found'), 'error')
         return false
     end
 
-    TriggerEvent('illenium-appearance:client:changeOutfit', {
-        model = model,
-        components = components,
-        props = props,
-        disableSave = true,
-    })
+    local drawableCount = GetNumberOfPedDrawableVariations(
+        ped,
+        component
+    )
 
-    return true
+    local textureCount = 0
+
+    if isValidDrawable(component, drawable) then
+        textureCount = GetNumberOfPedTextureVariations(
+            ped,
+            component,
+            drawable
+        )
+    end
+
+    debug(('Applying clothing: component=%s drawable=%s texture=%s'):format(
+        component,
+        drawable,
+        texture
+    ))
+
+    debug(('Available drawables=%s textures=%s'):format(
+        drawableCount,
+        textureCount
+    ))
+
+    if not isValidDrawable(component, drawable) then
+        notify(
+            L('drawable_invalid', drawable, drawableCount),
+            'error'
+        )
+
+        return false
+    end
+
+    if texture < 0 or texture >= textureCount then
+        notify(
+            L('texture_invalid', texture, drawable, textureCount),
+            'error'
+        )
+
+        return false
+    end
+
+    if resolvedCollection and backpack.localDrawable then
+        SetPedCollectionComponentVariation(ped, component, resolvedCollection, backpack.localDrawable, texture, 0)
+    else
+        SetPedComponentVariation(ped, component, drawable, texture, 0)
+    end
+
+    Wait(50)
+
+    local appliedDrawable = GetPedDrawableVariation(
+        ped,
+        component
+    )
+
+    local appliedTexture = GetPedTextureVariation(
+        ped,
+        component
+    )
+
+    debug(('Applied clothing result: drawable=%s texture=%s'):format(
+        appliedDrawable,
+        appliedTexture
+    ))
+
+    return appliedDrawable == drawable
+        and appliedTexture == texture
 end
 
-local function playBackpackAnimation()
-    if not Config.Animation.enabled then return end
+local function restoreBaseClothing()
+    if not baseComponent then
+        return
+    end
+
+    local ped = PlayerPedId()
+
+    SetPedComponentVariation(
+        ped,
+        baseComponent.component,
+        baseComponent.drawable,
+        baseComponent.texture,
+        0
+    )
+
+    debug(('Restored base clothing: component=%s drawable=%s texture=%s'):format(
+        baseComponent.component,
+        baseComponent.drawable,
+        baseComponent.texture
+    ))
+
+    baseComponent = nil
+end
+
+local function startAnimation()
+    if not Config.Animation.enabled then
+        return
+    end
 
     if GetResourceState('rpemotes-reborn') ~= 'started' then
-        debug('rpemotes-reborn is not started; skipping animation')
+        debug('rpemotes-reborn not started.')
         return
     end
 
-    -- backpack is a PropEmote in rpemotes-reborn, so use its native
-    -- EmoteMenuStart handler with the correct emote type.
-    local started = false
-
-    if EmoteMenuStart and EmoteType and EmoteType.PROP_EMOTES then
-        started = pcall(function()
-            EmoteMenuStart(Config.Animation.emote, nil, EmoteType.PROP_EMOTES)
+    CreateThread(function()
+        pcall(function()
+            exports['rpemotes-reborn']:EmoteCommandStart(
+                Config.Animation.emote,
+                nil
+            )
         end)
-    end
 
-    if not started then
-        return
-    end
+        Wait(Config.Animation.duration)
 
-    -- The rpemotes backpack emote has a prop. The real backpack is the
-    -- clothing component, so remove only the temporary emote prop.
-    if Config.Animation.propCleanupDelay then
-        SetTimeout(Config.Animation.propCleanupDelay, function()
-            if DestroyAllProps then
-                pcall(DestroyAllProps)
-            end
+        pcall(function()
+            exports['rpemotes-reborn']:EmoteCancel(true)
         end)
-    end
-
-    SetTimeout(Config.Animation.duration, function()
-        if IsInAnimation and EmoteCancel then
-            pcall(EmoteCancel, true)
-        end
     end)
 end
 
-local function stopBackpackAnimation()
-    if GetResourceState('rpemotes-reborn') ~= 'started' then return end
+local function stopAnimation()
+    if GetResourceState('rpemotes-reborn') ~= 'started' then
+        return
+    end
 
     pcall(function()
-        exports['rpemotes-reborn']:EmoteCancel()
+        exports['rpemotes-reborn']:EmoteCancel(true)
     end)
 end
 
-local function buildComponentsWithBackpack(backpack)
-    local components = getCurrentComponents()
-    local target = backpack.component or 5
+local function saveEquipped(item, slot, backpackId)
+    local backpack = Config.Backpacks[item.name]
 
-    for i = 1, #components do
-        if components[i].component_id == target then
-            components[i].drawable = backpack.drawable
-            components[i].texture = backpack.texture
-            break
-        end
-    end
-
-    return components
-end
-
-local function equipBackpack(itemName, slot)
-    local backpack = Config.Backpacks[itemName]
-    if not backpack then return false end
-
-    if actionBusy then return false end
-    actionBusy = true
-
-    local prepared = lib.callback.await('cb-backpacks:server:prepareBackpack', false, slot)
-    if not prepared then
-        actionBusy = false
-        notify('No se pudo preparar esta mochila.', 'error')
+    if not backpack then
         return false
     end
 
-    if equipped and equipped.slot == slot then
-        -- Toggle off.
-        pcall(function()
-            exports.ox_inventory:closeInventory()
-        end)
-        stopBackpackAnimation()
+    local component = backpack.component or 5
 
-        if baseComponent then
-            local components = getCurrentComponents()
-            local target = backpack.component or 5
+    local saved = lib.callback.await(
+        'cb-backpacks:server:equip',
+        false,
 
-            for i = 1, #components do
-                if components[i].component_id == target then
-                    components[i].drawable = baseComponent.drawable
-                    components[i].texture = baseComponent.texture
-                    break
-                end
-            end
+        slot,
+        backpackId,
+        item.name,
+        component,
 
-            applyAppearanceComponents(components, getCurrentProps())
-        end
+        baseComponent.drawable,
+        baseComponent.texture
+    )
 
-        equipped = nil
-        baseComponent = nil
-        actionBusy = false
-        notify('Mochila retirada.', 'success')
-        return true
+    return saved == true
+end
+
+local function openBackpackStash(backpackId)
+    -- The item was used from the open inventory; reopen it on the stash.
+    pcall(function()
+        Bridge.Inventory.Close()
+    end)
+
+    Wait(250)
+
+    local opened = Bridge.Inventory.OpenStash(backpackId)
+
+    if opened == false then
+        notify(
+            L('open_failed'),
+            'error'
+        )
+    end
+end
+
+local function equipItem(item, slot, backpackId, openInventory)
+    if busy then
+        return false
     end
 
-    -- Switching from one backpack to another keeps the original clothing
-    -- underneath, instead of permanently setting component 5 to zero.
+    local backpack = Config.Backpacks[item.name]
+
+    if not backpack then
+        return false
+    end
+
+    busy = true
+
+    local component = backpack.component or 5
+
     if not equipped then
-        local componentId = backpack.component or 5
         baseComponent = {
-            drawable = GetPedDrawableVariation(cache.ped, componentId),
-            texture = GetPedTextureVariation(cache.ped, componentId),
+            component = component,
+            drawable = GetPedDrawableVariation(
+                PlayerPedId(),
+                component
+            ),
+            texture = GetPedTextureVariation(
+                PlayerPedId(),
+                component
+            ),
         }
+
+        debug(('Saved base clothing: drawable=%s texture=%s'):format(
+            baseComponent.drawable,
+            baseComponent.texture
+        ))
     end
 
-    if equipped then
-        stopBackpackAnimation()
+    if not applyBackpackClothing(backpack) then
+        baseComponent = nil
+        busy = false
+        return false
     end
 
-    local components = buildComponentsWithBackpack(backpack)
-    if not applyAppearanceComponents(components, getCurrentProps()) then
-        actionBusy = false
+    if not saveEquipped(item, slot, backpackId) then
+        restoreBaseClothing()
+
+        busy = false
+
+        notify(
+            L('save_failed'),
+            'error'
+        )
+
         return false
     end
 
     equipped = {
-        name = itemName,
+        id = backpackId,
+        name = item.name,
         slot = slot,
-        container = prepared,
     }
 
-    playBackpackAnimation()
+    startAnimation()
 
-    actionBusy = false
-    notify(('Equipaste %s.'):format(backpack.label), 'success')
+    busy = false
+
+    notify(
+        L('equipped', backpack.label),
+        'success'
+    )
+
+    if openInventory then
+        openBackpackStash(backpackId)
+    end
+
     return true
 end
 
-local function handleUsedItem(name, slot)
-    if not isBackpack(name) then return end
-
-    local key = ('%s:%s'):format(slot, name)
-    local now = GetGameTimer()
-
-    -- Protect against duplicate use notifications/events.
-    if lastUsed[key] and now - lastUsed[key] < 750 then
-        return
+local function unequip()
+    if busy then
+        return false
     end
 
-    lastUsed[key] = now
+    if not equipped then
+        return false
+    end
 
-    CreateThread(function()
-        Wait(50)
-        equipBackpack(name, slot)
+    busy = true
+
+    pcall(function()
+        Bridge.Inventory.Close()
     end)
-end
 
--- First use of an old backpack without metadata.container comes through the
--- client export. Later uses are handled directly by ox_inventory's container
--- path and arrive here through ox_inventory:usedItem.
-exports('useBackpack', function(data, slot)
-    local itemName = data and data.name or slot and slot.name
-    local slotId = slot and slot.slot or data and data.slot
+    stopAnimation()
 
-    if not isBackpack(itemName) or not slotId then return end
+    restoreBaseClothing()
 
-    local container = lib.callback.await(
-        'cb-backpacks:server:prepareBackpack',
-        false,
-        slotId
+    lib.callback.await(
+        'cb-backpacks:server:unequip',
+        false
     )
 
-    if not container then
-        notify('No se pudo preparar el inventario de la mochila.', 'error')
+    local oldName = equipped.name
+
+    equipped = nil
+
+    busy = false
+
+    notify(
+        L('unequipped', Config.Backpacks[oldName].label),
+        'success'
+    )
+
+    return true
+end
+
+local function useBackpack(data, slotData)
+    if busy then
         return
     end
 
-    lastUsed[('%s:%s'):format(slotId, itemName)] = GetGameTimer()
-    equipBackpack(itemName, slotId)
+    local itemName = data and data.name
 
-    -- The metadata update is sent back by ox_inventory. Give it a moment
-    -- before opening the container so the client has the generated ID.
-    SetTimeout(100, function()
-        exports.ox_inventory:openInventory('container', slotId)
-    end)
-end)
+    local slot = slotData and slotData.slot
 
-AddEventHandler('ox_inventory:usedItem', function(name, slotId)
-    handleUsedItem(name, slotId)
-end)
+    if not itemName or not slot then
+        return
+    end
 
-AddEventHandler('ox_inventory:updateInventory', function(changes)
-    if not equipped then return end
+    if not isBackpack(itemName) then
+        return
+    end
 
-    local changed = changes and changes[equipped.slot]
-    if changed == false or (changed and changed.name ~= equipped.name) then
-        -- Backpack was moved/removed from its equipped slot. We cannot safely
-        -- keep the clothing item equipped if that exact slot changed.
-        CreateThread(function()
-            Wait(100)
-            local items = exports.ox_inventory:GetPlayerItems()
-            local slot = items and items[equipped.slot]
+    debug(('useBackpack called: %s slot=%s'):format(
+        itemName,
+        slot
+    ))
 
-            if not slot or slot.name ~= equipped.name then
-                stopBackpackAnimation()
+    -- The inventory validates the use server-side.
+    Bridge.Inventory.UseItem(
+        data,
+        function(verified)
+            if not verified then
+                debug('The inventory rejected the backpack use.')
+                return
+            end
 
-                if baseComponent then
-                    local components = getCurrentComponents()
-                    local target = Config.Backpacks[equipped.name].component or 5
+            CreateThread(function()
+                local prepared = lib.callback.await(
+                    'cb-backpacks:server:prepare',
+                    false,
+                    slot
+                )
 
-                    for i = 1, #components do
-                        if components[i].component_id == target then
-                            components[i].drawable = baseComponent.drawable
-                            components[i].texture = baseComponent.texture
-                            break
-                        end
-                    end
+                if not prepared then
+                    notify(
+                        L('prepare_failed'),
+                        'error'
+                    )
 
-                    applyAppearanceComponents(components, getCurrentProps())
+                    return
                 end
 
-                equipped = nil
-                baseComponent = nil
-            end
-        end)
-    end
+                debug(('Backpack prepared: id=%s'):format(
+                    prepared.id
+                ))
+
+                -- Same physical backpack.
+                if equipped and equipped.id == prepared.id then
+                    openBackpackStash(prepared.id)
+                    return
+                end
+
+                -- Different backpack.
+                if equipped then
+                    stopAnimation()
+                    restoreBaseClothing()
+
+                    lib.callback.await(
+                        'cb-backpacks:server:unequip',
+                        false
+                    )
+
+                    equipped = nil
+                end
+
+                equipItem(
+                    {
+                        name = prepared.name,
+                        metadata = prepared.metadata,
+                    },
+                    prepared.slot or slot,
+                    prepared.id,
+                    true
+                )
+            end)
+        end
+    )
+end
+
+exports('useBackpack', useBackpack)
+
+-- Inventories without a client use export (e.g. qb-inventory) notify the client.
+RegisterNetEvent('cb-backpacks:client:use', function(name, slot)
+    useBackpack({ name = name }, { slot = slot })
 end)
 
-RegisterCommand(Config.Command.name, function()
-    if not Config.Command.enabled then return end
+local restoring = false
 
-    if equipped then
-        equipBackpack(equipped.name, equipped.slot)
+local function restoreBackpack()
+    if not Config.Restore.enabled or equipped or busy or restoring then
         return
     end
 
-    local items = exports.ox_inventory:GetPlayerItems()
-    for slot, item in pairs(items or {}) do
-        if item and isBackpack(item.name) then
-            equipBackpack(item.name, slot)
-            return
-        end
-    end
-
-    notify('No tienes una mochila.', 'error')
-end, false)
-
-AddEventHandler('illenium-appearance:client:appearanceLoaded', function()
-    if not Config.Restore.enabled then return end
+    restoring = true
 
     CreateThread(function()
         Wait(Config.Restore.delay)
+        restoring = false
 
-        -- We intentionally do not guess which backpack was equipped after a
-        -- hard character/resource restart. The item remains persistent in
-        -- ox_inventory and can be equipped normally by using it.
+        local state = lib.callback.await(
+            'cb-backpacks:server:getEquipped',
+            false
+        )
+
+        if not state then
+            debug('No persisted equipped backpack.')
+            return
+        end
+
+        debug(('Persisted backpack found: %s'):format(
+            state.backpack_id
+        ))
+
+        local slot, item = findBackpackById(
+            state.backpack_id
+        )
+
+        if not slot or not item then
+            debug('Persisted backpack no longer exists.')
+
+            TriggerServerEvent(
+                'cb-backpacks:server:verifyEquipped'
+            )
+
+            return
+        end
+
+        local backpack = Config.Backpacks[item.name]
+
+        if not backpack then
+            return
+        end
+
+        local ped = PlayerPedId()
+
+        baseComponent = {
+            component = state.component_id or 5,
+            drawable = tonumber(state.base_drawable) or 0,
+            texture = tonumber(state.base_texture) or 0,
+        }
+
+        if not applyBackpackClothing(backpack) then
+            baseComponent = nil
+            return
+        end
+
+        equipped = {
+            id = state.backpack_id,
+            name = item.name,
+            slot = slot,
+        }
+
+        debug(('Restored backpack %s from slot %s'):format(
+            item.name,
+            slot
+        ))
     end)
+end
+
+local function verifyEquippedItem()
+    if not equipped then
+        return
+    end
+
+    local slot, item = findBackpackById(
+        equipped.id
+    )
+
+    if slot and item then
+        -- Slot changed. Keep equipped.
+        if slot ~= equipped.slot then
+            debug(('Backpack moved %s -> %s'):format(
+                equipped.slot,
+                slot
+            ))
+
+            equipped.slot = slot
+        end
+
+        return
+    end
+
+    debug('Equipped backpack no longer exists.')
+
+    stopAnimation()
+
+    restoreBaseClothing()
+
+    equipped = nil
+
+    lib.callback.await(
+        'cb-backpacks:server:unequip',
+        false
+    )
+
+    notify(
+        L('item_lost'),
+        'error'
+    )
+end
+
+RegisterNetEvent(
+    'cb-backpacks:client:forceUnequip',
+    function()
+        if not equipped then
+            return
+        end
+
+        stopAnimation()
+        restoreBaseClothing()
+
+        equipped = nil
+    end
+)
+
+if Bridge.Inventory then
+    Bridge.Inventory.OnUpdate(function()
+        CreateThread(function()
+            Wait(150)
+
+            verifyEquippedItem()
+        end)
+    end)
+end
+
+RegisterCommand(
+    Config.Command.name,
+    function()
+        if not Config.Command.enabled then
+            return
+        end
+
+        if busy then
+            return
+        end
+
+        if equipped then
+            openBackpackStash(equipped.id)
+            return
+        end
+
+        local state = lib.callback.await(
+            'cb-backpacks:server:getEquipped',
+            false
+        )
+
+        if state then
+            local slot, item = findBackpackById(
+                state.backpack_id
+            )
+
+            if slot and item then
+                local backpack = Config.Backpacks[item.name]
+
+                if backpack then
+                    baseComponent = {
+                        component = state.component_id or 5,
+                        drawable = tonumber(state.base_drawable) or 0,
+                        texture = tonumber(state.base_texture) or 0,
+                    }
+
+                    if applyBackpackClothing(backpack) then
+                        equipped = {
+                            id = state.backpack_id,
+                            name = item.name,
+                            slot = slot,
+                        }
+
+                        startAnimation()
+
+                        Bridge.Inventory.OpenStash(state.backpack_id)
+
+                        return
+                    end
+                end
+            end
+        end
+
+        local items = getPlayerItems()
+
+        for slot, item in pairs(items) do
+            if item and isBackpack(item.name) then
+                local metadata = item.metadata or {}
+                local backpackId = metadata[Config.Metadata.id]
+
+                local prepared = lib.callback.await(
+                    'cb-backpacks:server:prepare',
+                    false,
+                    slot
+                )
+
+                if prepared then
+                    equipItem(
+                        {
+                            name = item.name,
+                            metadata = prepared.metadata,
+                        },
+                        slot,
+                        prepared.id,
+                        true
+                    )
+
+                    return
+                end
+            end
+        end
+
+        notify(
+            L('no_backpack'),
+            'error'
+        )
+    end,
+    false
+)
+
+Bridge.OnPlayerLoaded(restoreBackpack)
+
+CreateThread(function()
+    Wait(5000)
+
+    restoreBackpack()
 end)
 
-AddEventHandler('QBCore:Client:OnPlayerLoaded', function()
-    if not Config.Restore.enabled then return end
-    -- Qbox keeps this compatibility event for QB resources.
-end)
+AddEventHandler(
+    'onResourceStop',
+    function(resource)
+        if resource ~= GetCurrentResourceName() then
+            return
+        end
 
-AddEventHandler('onResourceStop', function(resource)
-    if resource ~= GetCurrentResourceName() then return end
-    stopBackpackAnimation()
-end)
+        stopAnimation()
+    end
+)
 
 exports('getEquippedBackpack', function()
     return equipped
